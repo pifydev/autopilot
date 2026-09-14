@@ -91,9 +91,14 @@ export default function autopilot(pi: ExtensionAPI) {
     turns++;
     renderStatus(ctx);
     try {
+      // deliverAs "followUp" (not "nextTurn"): while idle, pi runs a message
+      // delivered as followUp/steer immediately (triggerTurn → _runAgentPrompt),
+      // whereas a "nextTurn" message is only QUEUED into whatever turn starts
+      // next and never drives one itself — which meant autopilot armed but never
+      // actually advanced. followUp is what @pify/goal uses to self-drive too.
       await pi.sendMessage(
         { customType: NUDGE_TYPE, content: nudgeText(), display: false },
-        { triggerTurn: true, deliverAs: "nextTurn" },
+        { triggerTurn: true, deliverAs: "followUp" },
       );
     } catch {
       // A /reload or a busy session makes the captured handle throw; stop

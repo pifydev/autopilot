@@ -33,6 +33,8 @@ It drives each turn on `agent_settled` (fully idle) via a triggered message, so 
 
 Give a goal (recommended) and it works toward that, one concrete step per turn; without one it just continues the current task. It stops on any of: the done signal, the turn cap, no progress, an error, or `/autopilot off`.
 
+**With [`@pify/goal`](https://github.com/pifydev/goal):** both self-drive the idle agent, so arm only one at a time — running both just means the turn gets nudged twice. Pick autopilot for "keep going until done" or goal for its evidence-gated, budgeted completion.
+
 ## Settings
 
 `.pi/autopilot.json` (project) or `<agentDir>/autopilot.json` (global):
