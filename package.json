@@ -1,0 +1,75 @@
+{
+  "name": "@pify/autopilot",
+  "version": "0.1.0",
+  "description": "Let the main agent keep going on its own between turns — opt-in, hard-capped by turn count and a no-progress breaker, and it never runs while you are being asked something",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi",
+    "pify",
+    "autopilot",
+    "autonomous",
+    "agent"
+  ],
+  "homepage": "https://github.com/pifydev/autopilot#readme",
+  "bugs": {
+    "url": "https://github.com/pifydev/autopilot/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pifydev/autopilot.git"
+  },
+  "license": "MIT",
+  "author": "Pify maintainers",
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "files": [
+    "extensions",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions/autopilot.ts"
+    ]
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "prepublishOnly": "npm run typecheck && npm test"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-ai": {
+      "optional": true
+    },
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "@earendil-works/pi-tui": {
+      "optional": true
+    },
+    "typebox": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "^0.85.1",
+    "@earendil-works/pi-coding-agent": "^0.85.1",
+    "@earendil-works/pi-tui": "^0.85.1",
+    "@types/node": "^22.10.2",
+    "typebox": "^1.1.38",
+    "typescript": "^5.7.2"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
