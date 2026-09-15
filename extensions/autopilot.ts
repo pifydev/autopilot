@@ -22,7 +22,7 @@ import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { decide, hasDoneSignal, DONE_TOKEN } from "../src/decide.ts";
+import { decide, hasDoneSignal, summarizeTurn, shouldResetOnSessionStart, DONE_TOKEN } from "../src/decide.ts";
 import { DEFAULT_SETTINGS, resolveSettings, type AutopilotSettings } from "../src/settings.ts";
 import { LoopGuard } from "../src/loop-guard.ts";
 
@@ -109,8 +109,23 @@ export default function autopilot(pi: ExtensionAPI) {
 
   // ── the loop ─────────────────────────────────────────────────────────
 
-  pi.on("session_start", async (_event, ctx) => {
+  pi.on("session_start", async (event, ctx) => {
     lastCtx = ctx;
+    // A /new, /resume, or fork replaces the session under a still-armed pilot,
+    // which would then drive a fresh, unrelated session toward the old goal.
+    // Only /reload keeps the same session, so keep arming across a reload alone.
+    if (shouldResetOnSessionStart(armed, event.reason)) {
+      armed = false;
+      goal = null;
+      turns = 0;
+      done = false;
+      stalled = false;
+      guard = new LoopGuard();
+      if (ctx.hasUI) {
+        ctx.ui.notify("Autopilot disarmed: new session.", "info");
+        renderStatus(ctx);
+      }
+    }
     const warnings = loadSettings(ctx.cwd);
     if (warnings.length > 0 && ctx.hasUI) ctx.ui.notify(`autopilot settings: ${warnings.join("; ")}`, "warning");
   });
@@ -125,17 +140,19 @@ export default function autopilot(pi: ExtensionAPI) {
   pi.on("agent_end", async (event, ctx) => {
     lastCtx = ctx;
     if (!armed) return;
-    const messages = (event as { messages?: Array<{ role?: string; content?: unknown }> }).messages ?? [];
-    const last = [...messages].reverse().find((m) => m.role === "assistant");
-    const content = Array.isArray(last?.content) ? (last!.content as Array<Record<string, unknown>>) : [];
-    const usedTool = content.some((b) => b.type === "toolCall");
-    const text = content
-      .filter((b) => b.type === "text" && typeof b.text === "string")
-      .map((b) => b.text as string)
-      .join("\n");
-    if (hasDoneSignal(text)) done = true;
+    const messages = (event as { messages?: unknown[] }).messages ?? [];
+    const turn = summarizeTurn(messages);
+    // You pressed Esc: never re-drive an interrupted turn — disarm instead.
+    if (turn.aborted) {
+      disarm(ctx, "stopped: you interrupted");
+      return;
+    }
+    if (hasDoneSignal(turn.text)) done = true;
     // Feed the no-progress breaker; a stall stops autopilot at the next settle.
-    stalled = guard.observe({ text, usedTool }).stalled;
+    // usedTool is read across the whole run (see summarizeTurn) — the final
+    // assistant message never carries a tool call, so reading only it would make
+    // this always false and silently disable the stall guard's progress reset.
+    stalled = guard.observe({ text: turn.text, usedTool: turn.usedTool }).stalled;
   });
 
   pi.on("agent_settled", async (_event, ctx) => {
