@@ -1,6 +1,6 @@
 {
   "name": "@pify/autopilot",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "Let the main agent keep going on its own between turns — opt-in, hard-capped by turn count and a no-progress breaker, and it never runs while you are being asked something",
   "keywords": [
     "pi-package",

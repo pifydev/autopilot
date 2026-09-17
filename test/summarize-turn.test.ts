@@ -63,12 +63,32 @@ test("aborted is false for a normally finished run", () => {
 });
 
 test("summarizeTurn tolerates an empty run and non-object entries", () => {
-  assert.deepEqual(summarizeTurn([]), { text: "", usedTool: false, aborted: false });
+  assert.deepEqual(summarizeTurn([]), { text: "", usedTool: false, aborted: false, errored: false, errorMessage: "" });
   assert.deepEqual(summarizeTurn([null, 42, "x", user("hi")]), {
     text: "",
     usedTool: false,
     aborted: false,
+    errored: false,
+    errorMessage: "",
   });
+});
+
+// ── f032: an errored run must be detectable so autopilot can stop, not re-drive ──
+
+test("errored is true (with its message) when the last assistant stopReason is 'error'", () => {
+  // pi ends a run on an error assistant message after exhausting its own retries;
+  // an error before streaming has empty content, so text is "".
+  const run = [{ role: "assistant", content: [], stopReason: "error", errorMessage: "429 rate limited" }];
+  const turn = summarizeTurn(run);
+  assert.equal(turn.errored, true);
+  assert.equal(turn.errorMessage, "429 rate limited");
+  assert.equal(turn.text, "");
+});
+
+test("errored is false and errorMessage empty for a normally finished run", () => {
+  const turn = summarizeTurn([assistant([text("all good")], "stop")]);
+  assert.equal(turn.errored, false);
+  assert.equal(turn.errorMessage, "");
 });
 
 test("the done token is still detected in the summarized text", () => {
@@ -76,17 +96,14 @@ test("the done token is still detected in the summarized text", () => {
   assert.ok(hasDoneSignal(summarizeTurn(run).text));
 });
 
-// ── bug 3: armed state must not survive a session swap ──
+// ── bug 3 / f036: armed state must not survive a session swap ──
+// A /reload re-instantiates the extension (armed starts false again), so the
+// reason no longer matters: reset whenever a session_start finds us still armed.
 
-test("shouldResetOnSessionStart disarms on new/resume/fork/startup, not reload", () => {
-  for (const reason of ["new", "resume", "fork", "startup"]) {
-    assert.equal(shouldResetOnSessionStart(true, reason), true, reason);
-  }
-  assert.equal(shouldResetOnSessionStart(true, "reload"), false, "a reload keeps the same session armed");
+test("shouldResetOnSessionStart disarms whenever still armed", () => {
+  assert.equal(shouldResetOnSessionStart(true), true);
 });
 
 test("shouldResetOnSessionStart is a no-op when autopilot was never armed", () => {
-  for (const reason of ["new", "resume", "fork", "startup", "reload"]) {
-    assert.equal(shouldResetOnSessionStart(false, reason), false, reason);
-  }
+  assert.equal(shouldResetOnSessionStart(false), false);
 });

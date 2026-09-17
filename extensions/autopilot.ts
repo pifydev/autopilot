@@ -22,7 +22,15 @@ import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { decide, hasDoneSignal, summarizeTurn, shouldResetOnSessionStart, DONE_TOKEN } from "../src/decide.ts";
+import {
+  decide,
+  hasDoneSignal,
+  hasBlockedSignal,
+  summarizeTurn,
+  shouldResetOnSessionStart,
+  DONE_TOKEN,
+  BLOCKED_TOKEN,
+} from "../src/decide.ts";
 import { DEFAULT_SETTINGS, resolveSettings, type AutopilotSettings } from "../src/settings.ts";
 import { LoopGuard } from "../src/loop-guard.ts";
 
@@ -38,8 +46,28 @@ export default function autopilot(pi: ExtensionAPI) {
   let blocked = false;
   let done = false;
   let stalled = false;
+  // The agent asked to hand a decision back to the user (emitted BLOCKED_TOKEN).
+  let blockedByAgent = false;
+  // The last settled run ended on a provider/model error pi could not retry away.
+  // Recorded in agent_end (a successful retry's agent_end overwrites it) and acted
+  // on in the settle handler — never inside agent_end, which fires BEFORE pi
+  // decides whether to auto-retry, so a transient 429 must not disarm on sight.
+  let lastErrored = false;
+  let lastError = "";
+  // A settle returned "wait" (a dialog was open); resume when the dialog closes.
+  let parked = false;
   let guard = new LoopGuard();
   let lastCtx: UiContext | null = null;
+
+  function resetRunState(): void {
+    turns = 0;
+    done = false;
+    stalled = false;
+    blockedByAgent = false;
+    lastErrored = false;
+    lastError = "";
+    parked = false;
+  }
 
   function loadSettings(cwd: string): string[] {
     for (const file of [join(cwd, ".pi", "autopilot.json"), join(getAgentDir(), "autopilot.json")]) {
@@ -71,9 +99,7 @@ export default function autopilot(pi: ExtensionAPI) {
     if (!armed) return;
     armed = false;
     goal = null;
-    done = false;
-    stalled = false;
-    turns = 0;
+    resetRunState();
     if (ctx.hasUI) {
       ctx.ui.notify(`Autopilot ${reason}.`, "info");
       renderStatus(ctx);
@@ -81,7 +107,16 @@ export default function autopilot(pi: ExtensionAPI) {
   }
 
   function nudgeText(): string {
-    const close = `When the task is fully complete, end your reply with ${DONE_TOKEN} and stop.`;
+    // Two escape hatches, each anchored to the final line so a mid-reply mention
+    // does not trip them: done when finished, blocked when only the user can
+    // decide. Without the blocked token a genuine question just gets re-nudged
+    // until the cap, so spell it out — and forbid writing either token loosely.
+    const close =
+      `When the task is fully complete, end your reply with ${DONE_TOKEN} and stop. ` +
+      `If you cannot proceed without a decision or information only the user can give, ` +
+      `state exactly what you need and end your reply with ${BLOCKED_TOKEN} instead. ` +
+      `Write each token only as the very last thing in your reply, and do not write ` +
+      `either token for any other reason.`;
     return goal
       ? `Keep working toward this goal, one concrete step at a time:\n${goal}\n\n${close}`
       : `Continue the current task, one concrete step at a time. ${close}`;
@@ -89,6 +124,7 @@ export default function autopilot(pi: ExtensionAPI) {
 
   async function drive(ctx: UiContext): Promise<void> {
     turns++;
+    parked = false; // we are advancing now; nothing to resume later
     renderStatus(ctx);
     try {
       // deliverAs "followUp" (not "nextTurn"): while idle, pi runs a message
@@ -109,17 +145,33 @@ export default function autopilot(pi: ExtensionAPI) {
 
   // ── the loop ─────────────────────────────────────────────────────────
 
-  pi.on("session_start", async (event, ctx) => {
+  // Decide and act after a run has fully settled (or a blocking dialog closed).
+  // Shared by agent_settled and ui_prompt_end so both take the same safe path.
+  async function settle(ctx: UiContext): Promise<void> {
+    if (!armed) return;
+    // A run that ERRORED after pi exhausted its own retries: stop rather than
+    // re-drive a dead provider to the turn cap. Checked before decide() because
+    // an errored run carries no signal decide() understands (its text is empty).
+    if (lastErrored) {
+      disarm(ctx, `stopped: the last turn failed: ${lastError || "unknown error"}`);
+      return;
+    }
+    const decision = decide({ armed, turns, maxTurns: settings.maxTurns, blocked, stalled, done, blockedByAgent });
+    if (decision.action === "continue") await drive(ctx);
+    else if (decision.action === "stop") disarm(ctx, decision.reason);
+    else parked = true; // "wait": a dialog is open — resume when it closes
+  }
+
+  pi.on("session_start", async (_event, ctx) => {
     lastCtx = ctx;
-    // A /new, /resume, or fork replaces the session under a still-armed pilot,
-    // which would then drive a fresh, unrelated session toward the old goal.
-    // Only /reload keeps the same session, so keep arming across a reload alone.
-    if (shouldResetOnSessionStart(armed, event.reason)) {
+    // Any session_start under a still-armed pilot means stand down: a /new,
+    // /resume or fork replaces the session, so the pilot would drive a fresh,
+    // unrelated session toward the old goal. (A /reload re-instantiates the
+    // extension, so it never reaches here armed — it disarms silently.)
+    if (shouldResetOnSessionStart(armed)) {
       armed = false;
       goal = null;
-      turns = 0;
-      done = false;
-      stalled = false;
+      resetRunState();
       guard = new LoopGuard();
       if (ctx.hasUI) {
         ctx.ui.notify("Autopilot disarmed: new session.", "info");
@@ -133,8 +185,18 @@ export default function autopilot(pi: ExtensionAPI) {
   pi.on("ui_prompt_start", async () => {
     blocked = true;
   });
-  pi.on("ui_prompt_end", async () => {
+  pi.on("ui_prompt_end", async (_event, ctx) => {
+    lastCtx = ctx;
     blocked = false;
+    // If a settle already parked us on this dialog, the settle that cleared it
+    // will never fire again on its own (ui_prompt_end only flips the flag), so
+    // re-decide here. Guarded by `parked` (only a prior "wait" sets it) and by
+    // isIdle() so a dialog closing mid-run — where the turn resumes and will
+    // settle on its own — does not double-drive.
+    if (armed && parked && ctx.isIdle()) {
+      parked = false;
+      await settle(ctx);
+    }
   });
 
   pi.on("agent_end", async (event, ctx) => {
@@ -148,6 +210,15 @@ export default function autopilot(pi: ExtensionAPI) {
       return;
     }
     if (hasDoneSignal(turn.text)) done = true;
+    // The agent handed a decision back to the user; stop at the next settle with
+    // a "needs your input" reason, never the misleading "reported complete".
+    if (hasBlockedSignal(turn.text)) blockedByAgent = true;
+    // Record (do not act on) an errored run: pi emits this agent_end BEFORE it
+    // decides to auto-retry, so a transient failure pi recovers from will emit a
+    // fresh, non-error agent_end that overwrites these. The settle handler, which
+    // fires only after retries are exhausted, is where we act on it.
+    lastErrored = turn.errored;
+    lastError = turn.errorMessage;
     // Feed the no-progress breaker; a stall stops autopilot at the next settle.
     // usedTool is read across the whole run (see summarizeTurn) — the final
     // assistant message never carries a tool call, so reading only it would make
@@ -157,11 +228,7 @@ export default function autopilot(pi: ExtensionAPI) {
 
   pi.on("agent_settled", async (_event, ctx) => {
     lastCtx = ctx;
-    if (!armed) return;
-    const decision = decide({ armed, turns, maxTurns: settings.maxTurns, blocked, stalled, done });
-    if (decision.action === "continue") await drive(ctx);
-    else if (decision.action === "stop") disarm(ctx, decision.reason);
-    // "wait": stay armed, do nothing this settle
+    await settle(ctx);
   });
 
   pi.registerCommand("autopilot", {
@@ -188,9 +255,7 @@ export default function autopilot(pi: ExtensionAPI) {
       }
       if (v === "on") {
         armed = true;
-        turns = 0;
-        done = false;
-        stalled = false;
+        resetRunState();
         guard = new LoopGuard({ repeat: settings.maxUnchangedTurns });
         goal = rest.join(" ").trim() || null;
         ctx.ui.notify(`Autopilot on (cap ${settings.maxTurns} turns)${goal ? `, working toward: ${goal}` : ""}.`, "info");
